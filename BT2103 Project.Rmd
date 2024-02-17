@@ -1,0 +1,2470 @@
+---
+title: "BT2103 Group Project"
+author: "anonyomous"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r libraries, echo = FALSE, include = FALSE}
+library("tidyverse")
+library("leaps")
+library("ggplot2")
+library("nnet")
+library("RColorBrewer")
+library("corrplot")
+library("psych")
+library("ROCit")
+library("InformationValue")
+library("knitr")
+library("gridExtra")
+library("randomForest")
+library("ROCR")
+library("caret")
+library("ROSE")
+```
+\vspace{-5truemm}
+# Introduction
+This dataset contains information on default payments, demographic factors, credit data, history of payment, and bill statements of credit card clients in Taiwan from April 2005 to September 2005.
+\footnotesize
+```{r introduction, echo = FALSE}
+# Load data set
+cardDf = read.csv(file = "card.csv")
+
+# Renaming the headers
+names(cardDf) <- cardDf[1,]
+cardDf <- cardDf[-1,]
+
+head(cardDf)
+```
+\normalsize
+From a sample of the card data set, we can see the various features present for each user.
+
+There are 25 variables:
+
+* **ID**: ID of each client
+* **LIMIT_BAL**: Amount of given credit in NT dollars (includes individual and family/supplementary credit
+* **SEX**: Gender (1=male, 2=female)
+* **EDUCATION**: (1=graduate school, 2=university, 3=high school, 4=others, 5=unknown, 6=unknown)
+* **MARRIAGE**: Marital status (1=married, 2=single, 3=divorce; 0=others)
+* **AGE**: Age in years
+* **PAY_0**: Repayment status in September, 2005 (-2=No consumption; -1=Paid in full; 0=The use of revolving credit; 1=payment delay for one month; 2=payment delay for two months; . . .; 8=payment delay for eight months; 9=payment delay for nine months and above.)
+* **PAY_2 - PAY_6**: Repayment status in August, July, June, May and April respectively in 2005 (scale same as above)
+* **BILL_AMT1 - BILL_AMT6**: Amount of bill statement in September, August, July, June, May and April respectively in 2005 (NT dollar)
+* **PAY_AMT1 - PAY_AMT6**: Amount of previous payment in September, August, July, June, May and April respectively in 2005 (NT dollar)
+* **default.payment.next.month**: Default payment (1=yes, 0=no)
+
+There are a total of 30,000 observations in the sample.
+
+```{r check_for_anomalies_NA, echo = FALSE, results='hide'}
+# Check for NA
+sum(!complete.cases(cardDf))
+
+# For SEX
+unique(cardDf$SEX)
+
+# For EDUCATION
+unique(cardDf$EDUCATION)
+
+# For MARRIAGE
+unique(cardDf$MARRIAGE)
+```
+After checking the data, there are no rows which contains NA values.
+
+There are 2 categories of SEX, 1 and 2, 7 categories of EDUCATION, 1, 2, 3, 4, 5, 6, 0 and 4 categories of MARRIAGE, 1, 2, 3, 0.
+
+For EDUCATION, Categories 0, 4, 5, 6 should be classified together as Category 4 "Others". Furthermore, as the number of people classified as "Others" is small (1.56% of the data set), the team has decided to classify them together with people in High School, Category 3, to form the category, "High School and Below" since whoever did not attend University or Graduate School should have a high school diploma or below.
+
+Our team decided that MARRIAGE with Category 0 and 3, should be classified together with Category 2, "Single" as if they are not married, they must be single. For our data set, it makes more sense if we are looking in terms of married or single. Furthermore, the number of people classified in category 0 and 3 is small, only about 1.26% of the data set.
+
+```{r gender_trends, echo = FALSE}
+cardDf$LIMIT_BAL = as.numeric(cardDf$LIMIT_BAL)
+cardDf$AGE = as.numeric(cardDf$AGE)
+
+cardDf$MARRIAGE = ifelse(cardDf$MARRIAGE == 0, 3, cardDf$MARRIAGE)
+cardDf$MARRIAGE = ifelse(cardDf$MARRIAGE == 3, 2, cardDf$MARRIAGE)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 0, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 5, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 6, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 4, 3, cardDf$EDUCATION)
+```
+
+When we look into the data for PAY_0 to PAY_6, PAY_AMT1 to PAY_AMT6 and BILL_AMT1 to BILL_AMT6, our team saw that these are categorised by months. It is not wise to remove any of them from feature selection even if they are not statistically significant. Therefore, our team believes that it would be better to take the average of PAY_AMT1 to PAY_AMT6 and BILL_AMT1 to BILL_AMT6 to include them for our feature selection. Hence, we will create two new variables called PAY_AMT_MEAN and BILL_AMT_MEAN to be included in the data set.
+
+As for PAY_0 to PAY_6, our team believes that it is only concerning if an individual's total number of months delayed is large. Hence, we will classify categories -2 and -1 as 0 and sum up all six months to create a new variable called PAY_DELAY_TOTAL.
+\footnotesize
+```{r clean_pay_bill, echo = FALSE}
+cardDf$BILL_AMT_MEAN = as.numeric(cardDf$BILL_AMT1) + as.numeric(cardDf$BILL_AMT2) + as.numeric(cardDf$BILL_AMT3) + as.numeric(cardDf$BILL_AMT4) + as.numeric(cardDf$BILL_AMT5) + as.numeric(cardDf$BILL_AMT6) / 6
+
+cardDf$PAY_AMT_MEAN = as.numeric(cardDf$PAY_AMT1) + as.numeric(cardDf$PAY_AMT2) + as.numeric(cardDf$PAY_AMT3) + as.numeric(cardDf$PAY_AMT4) + as.numeric(cardDf$PAY_AMT5) + as.numeric(cardDf$PAY_AMT6) / 6
+
+cardDf$`default payment next month` <- as.numeric(cardDf$`default payment next month`)
+
+for (i in colnames(cardDf)) {
+  if (i == "PAY_0" | i == "PAY_2" | i == "PAY_3" | i == "PAY_4" | i == "PAY_5" | i == "PAY_6") {
+    cardDf[[i]] = ifelse(cardDf[[i]] == -2, 0, 
+                      ifelse(cardDf[[i]] == -1, 0, cardDf[[i]]))
+    
+  }
+}
+cardDf$PAY_DELAY_TOTAL = as.numeric(cardDf$PAY_0) + as.numeric(cardDf$PAY_2) + as.numeric(cardDf$PAY_3) + as.numeric(cardDf$PAY_4) + as.numeric(cardDf$PAY_5) + as.numeric(cardDf$PAY_6)
+
+cardDf$SEX = as.numeric(cardDf$SEX)
+cardDf$EDUCATION = as.numeric(cardDf$EDUCATION)
+cardDf$MARRIAGE = as.numeric(cardDf$MARRIAGE)
+
+cardDf11 <- cardDf
+cardDf1 <- cardDf11
+
+cardDf1_subset = cardDf1[c("LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE","PAY_AMT_MEAN", "BILL_AMT_MEAN",  "PAY_DELAY_TOTAL", "default payment next month")]
+str(cardDf1_subset)
+```
+\normalsize
+After cleaning the data, we attain the above data set.
+
+# Data Exploration
+For data exploration, our team did a 4:1 split of the data set into training and test set. We will be performing exploratory data analysis on the train data.
+```{r data_splitting, echo = F}
+data <- read.table("card.csv",sep=",",skip=2,header=FALSE)
+header <- scan("card.csv",sep=",",nlines=2,what=character())
+set.seed(1234)
+n = length(data$V1)
+index <- 1:nrow(data)
+testindex <- sample(index, trunc(n)/4)
+
+test.data <- cardDf[testindex,]
+train.data <- cardDf[-testindex,]
+
+test.data1 <- cardDf1[testindex,]
+train.data1 <- cardDf1[-testindex,]
+```
+\footnotesize
+```{r data_exploration_train, echo = FALSE}
+train_explore = cardDf1_subset[-testindex,]
+summary(train_explore)
+```
+\normalsize
+Through the help of the summary() function, we obtain the Minimum value, the 1st Quartile, the Median, the Mean, the Third Quartile and the maximum value of each variable. For continuous variables that we are analysing, we will consider data points that are 1.5 Interquartile range away from the lower or upper quartile as moderate outliers.
+
+```{r default_or_not_chart, echo = F, out.width="50%"}
+explore_target = as.factor(train_explore$`default payment next month`)
+levels(explore_target) = c("Non-default", "Default")
+
+table_DEFAULT = table(ifelse(train_explore$`default payment next month` == "1", "Default", "Non-default"))
+barplot(table_DEFAULT,
+        main = "Card Default Statistic",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        beside = TRUE,
+        ylim = c(0, 20000),
+        col = c("Lightblue", "dodgerblue"))
+```
+\
+From the barplot above, we can see that we have imbalanced data in the training data set. Therefore, for our models we will compare their performance based on average class accuracy instead of classification accuracy as classification accuracy can hide poor performance when the data is imbalanced.
+
+```{r LIMIT_BAL_chart, echo = F, out.width="50%"}
+# hist_LIMIT_BAL = hist(train_explore$LIMIT_BAL,
+#                       main = "Frequency of Limit Balance",
+#                       xlab = "Limit Balance")
+
+LIMIT_BAL_box = boxplot(train_explore$LIMIT_BAL,
+        range = 1.5,
+        horizontal = T)
+smallest_outlier = min(LIMIT_BAL_box$out)
+train_explore_LIMIT_BAL <- train_explore
+
+LIMIT_BAL_subset = train_explore_LIMIT_BAL %>%
+       filter(train_explore_LIMIT_BAL$LIMIT_BAL < 530000)
+hist(LIMIT_BAL_subset$LIMIT_BAL,
+     main = "Frequency of Limit Balance",
+                      xlab = "Limit Balance")
+```
+\
+Plotting a boxplot with range set to 1.5, there are 126 people or 0.56% of the train data set that had Limit Balance that is greater than 1.5 interquartile range from the upper quantile. After removing these individuals, we can see that the distribution of the Limit Balance of the people in the data set is right-skewed with 11 bins of size 50,000 from 0 to 550,000.
+
+```{r trends_chart, echo = F, out.width="50%"}
+table_SEX = table(train_explore$SEX, explore_target)
+barplot(table_SEX,
+        main = "Card Default Statistic with 'SEX' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Male", "Female"),
+        beside = TRUE,
+        ylim = c(0, 12000),
+        col = c("Lightblue", "dodgerblue"))
+
+table_EDUCATION = table(train_explore$EDUCATION, explore_target)
+barplot(table_EDUCATION,
+        main = "Card Default Statistic with 'EDUCATION' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Graduate School", "University", "High School and Below"),
+        beside = TRUE,
+        ylim = c(0, 10000),
+        col = brewer.pal(n = 3, "Blues"))
+
+table_MARRIAGE = table(train_explore$MARRIAGE, explore_target)
+barplot(table_MARRIAGE,
+        main = "Card Default Statistic with 'MARRIAGE' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Married", "Single"),
+        beside = TRUE,
+        ylim = c(0, 12000),
+        col = c("Lightblue", "dodgerblue"))
+```
+
+From the barplot with SEX feature, we can see that for both cases (default and non-default), by comparing the height of the bars, there are more females relative to males in this data set.
+
+From the barplot with EDUCATION feature, by comparing the heights of the bars, we can tell that the highest education qualification that most individuals in this dataset have received is from University, followed by Graduate School and lastly High School and below.
+
+From the barplot with MARRIAGE feature, by looking at the relative height of the bars, we can tell that there are more Single individuals as compared to Married individuals. 
+
+```{r age_histogram, echo =F,out.width = "50%"}
+# hist(train_explore$AGE,
+#      main = "Frequency of Age",
+#      xlab = "Age")
+AGE_box = boxplot(train_explore$AGE,
+        range = 1.5,
+        horizontal = T)
+train_explore_AGE <- train_explore
+smallest_outlier_AGE = min(AGE_box$out)
+
+AGE_subset = train_explore_AGE %>%
+       filter(train_explore_AGE$AGE < 60)
+hist(AGE_subset$AGE,
+     main = "Frequency of Age",
+                      xlab = "Age")
+
+```
+\
+Plotting the boxplot with range set to 1.5, we can see that there are 207 people or 0.92% of the train data set that had Age greater than the 1.5 interquartile range. After removing these people, we can see that the distribution of the Age of the people in the data set is right-skewed with 20 bins of size 2 from 20 to 60.
+
+```{r PAY_AMT_MEAN Histogram, echo = F,out.width = "50%"}
+hist(train_explore$PAY_AMT_MEAN,
+     main = "Frequency of PAY_AMT_MEAN",
+     xlab = "PAY_AMT_MEAN")
+# PAY_AMT_MEAN_box = boxplot(train_explore$PAY_AMT_MEAN,
+#         range = 2.5,
+#         horizontal = T)
+train_explore_PAY_AMT_MEAN <- train_explore
+# smallest_outlier_PAY_AMT_MEAN = min(PAY_AMT_MEAN_box$out)
+
+PAY_AMT_MEAN_subset = train_explore_PAY_AMT_MEAN %>%
+       filter(train_explore_PAY_AMT_MEAN$PAY_AMT_MEAN < 100000)
+hist(PAY_AMT_MEAN_subset$PAY_AMT_MEAN,
+     main = "Frequency of PAY_AMT_MEAN",
+                      xlab = "PAY_AMT_MEAN")
+
+```
+\
+We can see that there is just a small number of people with PAY_AMT_MEAN that is greater than 1,000,000. To be exact, there are 1134 people or 5.04% of the train data set that had PAY_AMT_MEAN greater than or equal to 1,000,000. After removing people with PAY_AMT_MEAN greater than or equal to 1,000,000. We can see that the distribution of the PAY_AMT_MEAN of the people in the data set is right-skewed with 20 bins of size 5000 from 0 to 1,000,000.
+
+```{r BILL_AMT_MEAN histogram, echo = F, out.width="50%"}
+hist(train_explore$BILL_AMT_MEAN,
+     main = "Frequency of BILL_AMT_MEAN",
+     xlab = "BILL_AMT_MEAN")
+# BILL_AMT_MEAN_box = boxplot(train_explore$BILL_AMT_MEAN,
+#         range = 1.5,
+#         horizontal = T)
+train_explore_BILL_AMT_MEAN <- train_explore
+# smallest_outlier_BILL_AMT_MEAN = min(BILL_AMT_MEAN_box$out)
+
+BILL_AMT_MEAN_subset = train_explore_BILL_AMT_MEAN %>%
+       filter(train_explore_BILL_AMT_MEAN$BILL_AMT_MEAN < 2000000)
+hist(BILL_AMT_MEAN_subset$BILL_AMT_MEAN,
+     main = "Frequency of BILL_AMT_MEAN",
+                      xlab = "BILL_AMT_MEAN")
+```
+\
+We can see that there is just a small number of people with BILL_AMT_MEAN that is greater than 2,000,000. To be exact, there are only 90 people or 0.4% of the train data set that had BILL_AMT_MEAN greater than or equal to 2000000. After removing them, we can see that the distribution of the BILL_AMT_MEAN of the people in the data set is right-skewed with 21 bins of size 100,000 from -100,000 to 2,000,000.
+
+```{r PAY_DELAY_TOTAL, echo = FALSE,out.width = "50%"}
+hist(train_explore$PAY_DELAY_TOTAL,
+     main = "Frequency of PAY_DELAY_TOTAL",
+     xlab = "PAY_DELAY_TOTAL")
+# PAY_DELAY_TOTAL_box = boxplot(train_explore$PAY_DELAY_TOTAL,
+#         range = 1.5,
+#         horizontal = T)
+train_explore_PAY_DELAY_TOTAL <- train_explore
+# smallest_outlier_PAY_DELAY_TOTAL = min(PAY_DELAY_TOTAL_box$out)
+
+PAY_DELAY_TOTAL_subset = train_explore_PAY_DELAY_TOTAL %>%
+       filter(train_explore_PAY_DELAY_TOTAL$PAY_DELAY_TOTAL <= 20)
+hist(PAY_DELAY_TOTAL_subset$PAY_DELAY_TOTAL,
+     main = "Frequency of PAY_DELAY_TOTAL",
+                      xlab = "PAY_DELAY_TOTAL")
+```
+\
+We can see that there is just a small number of people with PAY_DELAY_TOTAL that is greater than 20. To be exact, we can see that there are only 87 people or 0.387% of the train data set that had PAY_DELAY_TOTAL greater than to 20. After removing them, we can see that the distribution of the PAY_DELAY_TOTAL of the people in the data set is right-skewed with 20 bins of size 1 from 0 to 20, apart from one missing bin at PAY_DELAY_TOTAL = 19.
+
+# Feature Selection
+## Correlation Plot
+``` {r corrplot, echo = F, out.width="50%"}
+train.data1_numeric <- lapply(train.data1,as.numeric)
+
+a<-cbind(train.data1_numeric$"default payment next month", train.data1_numeric$LIMIT_BAL, train.data1_numeric$SEX, train.data1_numeric$EDUCATION, train.data1_numeric$MARRIAGE, train.data1_numeric$AGE, train.data1_numeric$PAY_AMT_MEAN, train.data1_numeric$BILL_AMT_MEAN, train.data1_numeric$PAY_DELAY_TOTAL)
+
+colnames(a) <- c("default payment next month", "LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE","PAY_AMT_MEAN", "BILL_AMT_MEAN",  "PAY_DELAY_TOTAL")
+res <- cor(a)
+
+corrplot(res,method = "number", mar=c(0.002,0.002,0.002,0.002), number.cex = 0.5, tl.cex = 0.5)
+```
+\
+From the correlation plot above, we can see that LIMIT_BAL, PAY_AMT_MEAN and PAY_DELAY_TOTAL has a correlation coefficient slightly greater than 0 with default payment next month. The team will keep that in mind as we use other techniques to determine useful features to be included in our prediction models.
+
+## Logistic Regression for Feature Selection
+\footnotesize
+```{r feature_selection_glm, echo = F}
+summary(glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(EDUCATION) + as.numeric(AGE) + as.factor(MARRIAGE) + BILL_AMT_MEAN+ PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data, family = "binomial"))
+```
+\normalsize
+By running logistic regression with these variables, our team noticed that the most significant features at 5% level of significance are LIMIT_BAL, SEX, MARRIAGE, BILL_AMT_MEAN, PAY_AMT_MEAN and PAY_DELAY_TOTAL as they all have p-values that are less than 0.05. Therefore, we reject the null hypothesis and conclude that coefficient of these features are statistically significant.
+
+## Backward Feature Selection
+\footnotesize
+```{r feature_selection_backward, echo = FALSE}
+outbackward <- regsubsets(train.data$`default payment next month` ~ as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + as.factor(EDUCATION) + AGE + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, 
+                          data = train.data, 
+                          method = "backward")
+summary(outbackward)
+```
+\normalsize
+Backward feature selection starts with all the predictors in the model, also known as the full model, before iteratively removing the least contributive predictors. Our team noticed that using backward feature selection, the top three features are PAY_DELAY_TOTAL, LIMIT_BAL and PAY_AMT_MEAN. Both logistic regression and backward feature selection has provided the same top features that should be used in our prediction models.
+
+Therefore, our team will run models namely "Full Model" and "Half Model". "Full Model" will consist of all the statistically significant features in the logistic regression, namely, LIMIT_BAL, SEX, MARRIAGE, PAY_AMT_MEAN, BILL_AMT_MEAN and PAY_DELAY_TOTAL. "Half Model" will consist of the top three features produced by backward feature selection and logistic regression, namely, LIMIT_BAL, PAY_AMT_MEAN and PAY_DELAY_TOTAL.
+
+# Prediction Models
+For our models, we will be classifying Positive as Default and Negative as Non-Default
+
+## Baseline Predictions
+As we can generally assume that people would refrain from defaulting their credit cards as it would affect their credit rating. We establish a baseline prediction where we predict everyone to not default their credit cards (V25 = 0).
+```{r baseline_predictions, echo = FALSE}
+# For train data
+train_predict_0 = train.data %>% mutate(predict_0 = 0)
+train_accuracy = (nrow(train_predict_0) - sum(train_predict_0$`default payment next month`)) / nrow(train_predict_0)
+
+# For test data
+test_predict_0 = test.data %>% mutate(predict_0 = 0)
+test_accuracy = (nrow(test_predict_0) - sum(test_predict_0$`default payment next month`)) / nrow(test_predict_0)
+```
+
+Prediction accuracy on train data: 0.779200\
+Average Class Accuracy on train data: 0.500000\
+Prediction accuracy on test data: 0.777600\
+Average Class Accuracy on test data: 0.500000
+
+From the baseline prediction, we can see that by predicting all data points to be non-default, we can achieve a classification accuracy of 77.9% on the training data and 77.8% on the test data. However, when we look at the average class accuracy, we have attain a more lacklustre result of only 50% for both training and test data.
+
+```{r initialise_table, echo = F}
+output.mat = matrix(nrow = 10, ncol = 5)
+colnames(output.mat) = c("Model", "Train Average Class Accuracy", "Test Average Class Accuracy", "Test KS-Statistics", "Test AUC")
+```
+
+## Logistic Regression
+```{r glm, echo = F}
+# Logistic Regression Full Model
+modelfull <- glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, data = train.data, family = "binomial")
+fittedfull <- predict(modelfull, data = train.data, type="response")
+
+# Logistical Regression Half Model
+modelhalf <- glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data, family = "binomial")
+fittedhalf <- predict(modelhalf, data = train.data, type="response")
+```
+For the full model (modelfull), we run logistic regression with the variables the logistic regression shows were statistically significant. Namely, the variables LIMIT_BAL, SEX, MARRIAGE, BILL_AMT_MEAN, PAY_AMT_MEAN, PAY_DELAY_TOTAL. After obtaining the model, we use it to predict the values of `default payment next month` with the training data to obtain an accuracy of 80.6%. Using the model to predict values of `default payment next month` with the test data yields an accuracy of 72.70%. This value is lower than the baseline prediction of 77.76%.
+
+For the half model (modelhalf), we run logistic regression with the variables the backward feature selection deems best (ie most number of * signs). We will remove variable that is the least statistically significant relative to the other variables, which is SEX, MARRIAGE and BILL_AMT_MEAN to see if this improves the accuracy of our new model. The variables present in building the logistic regression model this time are LIMIT_BAL, PAY_AMT_MEAN and PAY_DELAY_TOTAL. With this new model, we use it to predict the values of `default payment next month` with the training data to obtain an accuracy of 80.48%. Using the model to predict values of `default payment next month` with the test data yields an accuracy of 73.0%. This value is lower than the baseline prediction of 77.76%.
+
+Now, we will evaluate the performance of this model after we determine the optimal threshold for both models.
+
+### Threshold 
+```{r threshold, echo = F, out.width="50%"}
+predictionsfull <- prediction(fittedfull,train.data$`default payment next month`)
+sens <- data.frame(x=unlist(performance(predictionsfull, "sens")@x.values), 
+                   y=unlist(performance(predictionsfull, "sens")@y.values))
+spec <- data.frame(x=unlist(performance(predictionsfull, "spec")@x.values), 
+                   y=unlist(performance(predictionsfull, "spec")@y.values))
+
+first = sens %>% ggplot(aes(x,y)) + 
+  geom_line() + 
+  ggtitle("Full Model") +
+  geom_line(data=spec, aes(x,y,col="red")) +
+  scale_y_continuous(sec.axis = sec_axis(~., name = "Specificity")) +
+  labs(x='Cutoff', y="Sensitivity") +
+  theme(axis.title.y.right = element_text(colour = "red"), legend.position="none")
+
+sens = cbind(unlist(performance(predictionsfull, "sens")@x.values), unlist(performance(predictionsfull, "sens")@y.values))
+spec = cbind(unlist(performance(predictionsfull, "spec")@x.values), unlist(performance(predictionsfull, "spec")@y.values))
+
+
+predictionshalf <- prediction(fittedhalf,train.data$`default payment next month`)
+sens <- data.frame(x=unlist(performance(predictionshalf, "sens")@x.values), 
+                   y=unlist(performance(predictionshalf, "sens")@y.values))
+spec <- data.frame(x=unlist(performance(predictionshalf, "spec")@x.values), 
+                   y=unlist(performance(predictionshalf, "spec")@y.values))
+
+second = sens %>% ggplot(aes(x,y)) + 
+  geom_line() +
+  ggtitle("Half Model") +
+  geom_line(data=spec, aes(x,y,col="red")) +
+  scale_y_continuous(sec.axis = sec_axis(~., name = "Specificity")) +
+  labs(x='Cutoff', y="Sensitivity") +
+  theme(axis.title.y.right = element_text(colour = "red"), legend.position="none")
+
+sens = cbind(unlist(performance(predictionshalf, "sens")@x.values), unlist(performance(predictionshalf, "sens")@y.values))
+spec = cbind(unlist(performance(predictionshalf, "spec")@x.values), unlist(performance(predictionshalf, "spec")@y.values))
+grid.arrange(first, second, ncol = 2)
+```
+\
+The best threshold (or cutoff) to be used in the glm models is the point which maximises the specificity and the sensitivity. Therefore, the threshold we will be using is 0.17396 for the full model and 0.16765 for the half model as shown by the intersection of the two graph where both sensitivity and specificity is maximised. 
+
+### Logistic Regression Full Model (Threshold = 0.5)
+```{r evalglm0.5, echo=F, out.width="50%"}
+err_metric=function(CM, data_type)
+{
+  TN =CM[1,1]
+  TP =CM[2,2]
+  FP =CM[1,2]
+  FN =CM[2,1]
+  precision =(TP)/(TP+FP)
+  recall_score =(TP)/(TP+FN)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  accuracy_model  =(TP+TN)/(TP+TN+FP+FN)
+  True_positive_rate = (TP)/(TP+FN)
+  True_negative_rate =(TN)/(TN+FP)
+  Avg_class_accuracy =(True_positive_rate + True_negative_rate)/2
+  
+  if (data_type == "Train") {
+    #print("Positive = default, Negative = non default")
+    # print(paste("Train Average class accuracy: ", round(Avg_class_accuracy, 5)))
+  } else {
+    #print(paste("Test Average class accuracy: ", round(Avg_class_accuracy, 5)))
+    #print(paste("Test F1 score of the model: ",round(f1_score,5)))
+  }
+  return(round(Avg_class_accuracy, 5))
+}
+
+logit_P = predict(modelfull, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.5  ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_full_train_low = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted11 <- predict(modelfull, test.data, type="response")
+a <- ifelse(fitted11 <= 0.5, 0, 1)
+test <- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+#print(paste("Train Average class accuracy: ", round(glm_full_train_low, 5)))
+glm_full_test_low = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+output.mat[1,] = c("Logistic Regression Full Model (Threshold = 0.5)", glm_full_train_low, glm_full_test_low, KS_stat_test, AUC_test)
+```
+Taking positive values to be equivalent to defaulting, when we let the threshold be 0.5, the full model yields a Train Average class accuracy of 0.60544, Test Average class accuracy of 0.60087, Test F1 score of the model would be 0.35118 and Test AUC for model is 0.74389 and the Test KS statistic is 0.39478.
+
+When we let the threshold = 0.5, the full model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.74389, which is greater than 0.5. This means that the model is performing better than a random classifier.
+
+### Logistic Regression Half Model (Threshold = 0.5)
+```{r glm_half_0.5_eval, echo = F, results='hide', out.width="50%"}
+logit_P = predict(modelhalf, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.5  ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_half_train_low = err_metric(CM, "Train")
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted22 <- predict(modelhalf, test.data, type="response")
+a <- ifelse(fitted22 <= 0.5, 0, 1)
+test<- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+print(paste("Train Average class accuracy: ", round(glm_half_train_low, 5)))
+glm_half_test_low = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+plot(test.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[2,] = c("Logistic Regression Half Model (Threshold = 0.5)", glm_half_train_low, glm_half_test_low, KS_stat_test, AUC_test)
+```
+Taking positive values to be equivalent to defaulting, when we let the threshold be 0.5, the full model yields a Train Average class accuracy of 0.60629, Test Average class accuracy of 0.6001, Test F1 score of the model would be 0.34946 and Test AUC for model is 0.74545 and the Test KS statistic is 0.39048.
+
+When the threshold = 0.5, the half model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.74545, which is greater than 0.5. This means that the model is performing better than a random classifier.
+ 
+### Logistic Regression Full Model (Optimized)
+```{r evalglm_full, echo = F, results='hide', out.width="50%"}
+logit_P = predict(modelfull, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.181004,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_full_opt_train = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+
+plot(train.ROC)
+title("ROC Train Plot")
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+
+# Test Data Evaluation
+fitted11 <- predict(modelfull, test.data, type="response")
+a <- ifelse(fitted11 > 0.1770384 , 1, 0)
+test <- cbind(test.data, a)
+print(paste("Train Average class accuracy: ", round(glm_full_opt_train, 5)))
+CM = table(test$`default payment next month`, test$a)
+glm_full_opt_test = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Test Plot")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[3,] = c("Logistic Regression Full Model (Optimized)", glm_full_opt_train, glm_full_opt_test, KS_stat_test, AUC_test)
+```
+
+Taking positive values to be equivalent to defaulting, when using the optimized threshold, the full model yields a Train Average class accuracy of 0.68726, Test Average class accuracy of 0.68341, Test F1 score of the model would be 0.48152 and Test AUC for model is 0.74389 and the Test KS statistic is 0.39478.
+
+The full model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.74389, which is greater than 0.5. This means that the model is performing better than a random classifier.
+
+### Logistic Regression Half Model (Optimized)
+```{r evalglm_half, echo = F, results='hide', out.width="50%"}
+logit_P = predict(modelhalf, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.1676483 ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_half_opt_train = err_metric(CM, "Train")
+
+#ROC-curve 
+vec_pred <- as.vector(predict(modelhalf, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+
+plot(train.ROC)
+title("ROC Train Plot")
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+
+# Test Data Evaluation
+fitted22 <- predict(modelhalf, test.data, type="response")
+a <- ifelse(fitted22 > 0.1676483 ,1,0)
+test<- cbind(test.data, a)
+print(paste("Train Average class accuracy: ", round(glm_half_opt_train, 5)))
+CM = table(test$`default payment next month`, test$a)
+glm_half_opt_test = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Plot")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[4,] = c("Logistic Regression Half Model (Optimized)", glm_half_opt_train, glm_half_opt_test, KS_stat_test, AUC_test)
+```
+Taking positive values to be equivalent to defaulting, when using the optimized threshold, the full model yields a Train Average class accuracy of 0.66701, Test Average class accuracy of 0.67228, Test F1 score of the model would be 0.47343 and Test AUC for model is 0.74545 and the Test KS statistic is 0.39048.
+
+The half model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.74545, which is greater than 0.5. This means that the model is performing better than a random classifier.
+
+## SVM
+```{r svm, echo = F, warning =F}
+library(e1071)
+# SVM Full Model
+svmfull.model <- svm(`default payment next month` ~ as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, data = train.data,type="C-classification",
+           kernel="radial")
+
+# SVM Half Model
+svmhalf.model <- svm(`default payment next month`~as.numeric(LIMIT_BAL) + PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data,type="C-classification",
+           kernel="radial")
+```
+Similar to what we have done for our glm model, after running backwards feature selection, we have arrived at a few predictors that we can use to build our regression model. Over here, our team has decided to run Support Vector Machine (SVM) with varying amounts of predictors in order to determine which model is the most accurate.
+
+For the full model (svmfull.model), we run SVM with the variables the logistic regression deems statistically significant. Namely, the variables LIMIT_BAL, SEX, MARRIAGE, BILL_AMT_MEAN, PAY_AMT_MEAN, PAY_DELAY_TOTAL. After obtaining the model, we use it to predict the values of default payment next month with the training data to obtain a classification accuracy of 80.9%. Using the model to predict values of default payment next month with the test data yields a classification accuracy of 79.8%.
+
+For the half model (svmhalf.model), we run SVM with the variables the backward features selection deems significant. Now, we will remove the variables that is the least statistically significant relative to the other variables, which is SEX, MARRIAGE and BILL_AMT_MEAN to see if this improves the accuracy of our new model. The variables present in building the SVM model this time are LIMIT_BAL, PAY_AMT_MEAN, PAY_DELAY_TOTAL. With this new model, we use it to predict the values of default payment next month with the training data to obtain a classification accuracy of 80.8%. Using the model to predict values of default payment next month with the test data yields a classification accuracy of 80%.
+
+Now, we will evaluate the performance of both model using average class accuracy, KS-statistics and AUC.
+
+### SVM Full Model
+```{r evalsvmtrain, echo = F, fig.show='hide', results='hide'}
+err_metric=function(CM, data_type)
+{
+  TN =CM[1,1]
+  TP =CM[2,2]
+  FP =CM[1,2]
+  FN =CM[2,1]
+  precision =(TP)/(TP+FP)
+  recall_score =(TP)/(TP+FN)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  accuracy_model  =(TP+TN)/(TP+TN+FP+FN)
+  True_positive_rate = (TP)/(TP+FN)
+  True_negative_rate =(TN)/(TN+FP)
+  Avg_class_accuracy =(True_positive_rate + True_negative_rate)/2
+  
+  if (data_type == "Train") {
+    print("Positive = default, Negative = non default")
+    print(paste("Train Average class accuracy: ", round(Avg_class_accuracy, 5)))
+  } else {
+    print(paste("Test Average class accuracy: ", round(Avg_class_accuracy, 5)))
+    print(paste("Test F1 score of the model: ",round(f1_score,5)))
+  }
+  return(round(Avg_class_accuracy, 5))
+}
+svm_P = predict(svmfull.model, data = train.data)
+CM= table(train.data$`default payment next month` , svm_P)
+svm_full_train = err_metric(CM,"Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(svmfull.model, data = train.data))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+#plot(train.ROC)
+#title("ROC for Train Data for SVM Full Model")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+#nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted11 <- predict(svmfull.model, test.data, type="response")
+a <- fitted11
+test <- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+svm_full_test = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(svmfull.model, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+#plot(test.ROC)
+#title("ROC for Test Data for SVM Full Model")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[5,] = c("SVM Full Model", svm_full_train, svm_full_test, KS_stat_test, AUC_test)
+```
+The accuracy for the full model is 80.9%. The average class accuracy is 61.7%. The K-S statistic is 0.23379. The F1 score of the model is 0.386959. These are all values on the training data.
+
+The SVM full model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.6084, which is greater than 0.5. This means that the model is performing better than a random classifier. The accuracy for the full model is 79.8%. The average class accuracy is 60.8%. The K-S statistic is 0.2168. The F1 score of the model is 0.37. These are all values for the model performance on the test data.
+
+### SVM Half model
+```{r evalsvmhalftrain, echo = F, fig.show='hide', results = 'hide'}
+svm_P = predict(svmhalf.model, data = train.data)
+CM= table(train.data$`default payment next month` , svm_P)
+svm_half_train = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(svm_P)
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+#plot(train.ROC)
+#title("ROC for Train Data for SVM Half Model")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+#nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted22 <- predict(svmhalf.model, test.data, type="response")
+a <- fitted22
+test<- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+svm_half_test = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(svmhalf.model, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+#plot(test.ROC)
+#title("ROC for Test Data for SVM Half Model")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+output.mat[6,] = c("SVM Half Model", svm_half_train, svm_half_test, KS_stat_test, AUC_test)
+```
+The accuracy for the full model is 80.8%. The average class accuracy is 62.6%. The K-S statistic is 0.25203. The F1 score is 0.40829. These are values of the performance of the model on training data.
+
+The SVM half model yields an Area under the Receiver Operating Characteristic (ROC) curve (AUC) of 0.61782, which is greater than 0.5. This means that the model is performing better than a random classifier. The accuracy for the full model is 80.0%. The average class accuracy is 61.8%. The K-S statistic is 0.23564. The F1 score of the model is 0.3919. These are values of the performance of the model on test data.
+
+## Neural Network
+As Neural Network works best with balanced data, our team balanced the data with a combination of oversampling and undersampling with the ovun.sample function. Despite balancing our data, we will still use the average class accuracy for comparison with other models.
+
+### Neural Network Full Model
+```{r neural_network, echo = F, out.width="50%"}
+# Stating the features required
+full_features <- c("LIMIT_BAL", "SEX", "MARRIAGE", "BILL_AMT_MEAN", "PAY_AMT_MEAN",  "PAY_DELAY_TOTAL")
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_full_cardDf_filtered = cardDf1[full_features]
+nn_full_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_full_balancing <- as.formula(paste("Class~", paste(full_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_full_result = ovun.sample(fmla_nn_full_balancing,
+                              data = nn_full_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_full_data = sampling_nn_full_result$data
+
+test_balance_data1 <- sampled_nn_full_data[testindex,]
+train_balance_data1 <- sampled_nn_full_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+fmla <- as.formula(paste("target~", paste(full_features, collapse = "+")))
+tk <- train_balance_data1[full_features]
+
+hidden.size = round((2/3) * ncol(tk) + 1)
+set.seed(1234)
+
+nn_full <- nnet(fmla, 
+           data = tk, 
+           maxit= 1000, 
+           size = hidden.size, 
+           entropy = T, 
+           decay = 0.8,
+           trace = F)
+
+# Outputs the predicted value for `default` between 0 and 1, for each observation
+nn_full_predict <- predict(nn_full, tk, type="raw")
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, nn_full_predict, optimiseFor="misclasserror")
+#print(paste("Optimal Cutoff: ",round(optcut,5)))
+
+# Confusion Matrix
+library(caret)
+target.values <- train_balance_data1$Class
+predicted.values <- ifelse(nn_full_predict < optcut, 0, 1)
+#table(as.factor(target.values), as.factor(predicted.values))
+
+# Prediction Accuracy
+nn_accuracy <- mean(target.values == predicted.values)
+#print(paste("Neural Network prediction accuracy: ",round(nn_accuracy,5)))
+
+# Misclassification rates
+target.values <- train_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_full_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_full_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_full_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+  
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_train <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("F1 Score: ", round(f1_score, 5)))
+#print(paste("Harmonic Mean: ",round(Harmonic.mean,5)))
+
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_full_predict)
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+# Misclassification rates for test
+# Generate for test balanced data set
+nn_full_test_predict <- predict(nn_full, test_balance_data1[full_features], type = "raw")
+target_test_values = test_balance_data1$Class
+predicted_test_values = ifelse(nn_full_test_predict < optcut, 0, 1)
+nn_test_accuracy <- mean(target_test_values == predicted_test_values)
+#print(paste("Neural Network Prediction Test Accuracy: ", round(nn_test_accuracy, 5)))
+
+target.values <- test_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_full_test_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_full_test_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_full_test_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_test <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+
+#print(paste("Train Average Class Accuracy: ",round(Ave.class.acc_train,5)))
+#print(paste("Test F1 Score: ", round(f1_score, 5)))
+#print(paste("Test Average Class Accuracy: ",round(Ave.class.acc_test,5)))
+#print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_full_test_predict)
+target = test_balance_data1$Class
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("Test KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(train.ROC$AUC,5)
+
+output.mat[7,] = c("Neural Network Full Model", round(Ave.class.acc_train, 5), round(Ave.class.acc_test, 5), KS_stat_test, AUC_test)
+```
+For our Neural Network Full Model, we set a maximum iterations of 1000 with size set to 5, decay to a value of 0.8 and entropy to TRUE. This allowed us to generate a model with the highest average class accuracy.
+
+From the model, we have achieved an average class accuracy for training set of 0.71034 and an average class accuracy for test set of 0.70267. The Harmonic Mean of the model is 0.69462. The F1 Score of the model is 0.67849. For AUC of ROC, the model attained a value of 0.76486 for the test set and a value of 0.41093 for the KS Statistics for the test set.
+
+### Neural Network Half Model
+```{r nn_half, echo = F, out.width="50%"}
+# Stating the features required
+half_features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+library(ROSE)
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_half_cardDf_filtered = cardDf1[half_features]
+nn_half_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_half_balancing <- as.formula(paste("Class~", paste(half_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_half_result = ovun.sample(fmla_nn_half_balancing,
+                              data = nn_half_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_half_data = sampling_nn_half_result$data
+
+test_balance_data1 <- sampled_nn_half_data[testindex,]
+train_balance_data1 <- sampled_nn_half_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+fmla <- as.formula(paste("target~", paste(half_features, collapse = "+")))
+tk <- train_balance_data1[half_features]
+
+hidden.size = round((2/3) * ncol(tk) + 1)
+set.seed(1234)
+
+nn_half <- nnet(fmla, 
+           data = tk, 
+           maxit= 1000, 
+           size = hidden.size, 
+           entropy = T,
+           decay = 0.8,
+           trace = F)
+
+# Outputs the predicted value for `default` between 0 and 1, for each observation
+nn_half_predict <- predict(nn_half, tk, type="raw")
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, nn_half_predict, optimiseFor="misclasserror")
+#print(paste("Optimal Cutoff: ",round(optcut,5)))
+
+# Confusion Matrix
+library(caret)
+target.values <- train_balance_data1$Class
+predicted.values <- ifelse(nn_half_predict < optcut, 0, 1)
+#table(as.factor(target.values), as.factor(predicted.values))
+
+# Prediction Accuracy
+nn_accuracy <- mean(target.values == predicted.values)
+#print(paste("Neural Network prediction accuracy: ",round(nn_accuracy,5)))
+
+# Misclassification rates
+target.values <- train_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_half_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_half_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_half_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_train <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("F1 Score: ", round(f1_score, 5)))
+#print(paste("Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_half_predict)
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+# Misclassification rates for test
+# Generate for test balanced data set
+nn_half_test_predict <- predict(nn_half, test_balance_data1[half_features], type = "raw")
+target_test_values = test_balance_data1$Class
+predicted_test_values = ifelse(nn_half_test_predict < optcut, 0, 1)
+nn_test_accuracy <- mean(target_test_values == predicted_test_values)
+#print(paste("Neural Network Prediction Test Accuracy: ", round(nn_test_accuracy, 5)))
+
+target.values <- test_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_half_test_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_half_test_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_half_test_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_test <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("Train Average Class Accuracy: ",round(Ave.class.acc_train,5)))
+#print(paste("Test F1 Score: ", round(f1_score, 5)))
+#print(paste("Test Average Class Accuracy: ",round(Ave.class.acc_test,5)))
+#print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_half_test_predict)
+target = test_balance_data1$Class
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Plot")
+#print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("Test KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(train.ROC$AUC,5)
+
+output.mat[8,] = c("Neural Network Half Model", round(Ave.class.acc_train, 5), round(Ave.class.acc_test, 5), KS_stat_test, AUC_test)
+```
+For the Neural Network Half Model, we set the maximum iterations to 1000, size to 3, entropy to TRUE and decay to 0.8 to attain the highest average class accuracy.
+
+From the Neural Network Half Model, we have achieved an average class accuracy for training set of 0.70978 and an average class accuracy for test set of 0.70573. The model has a Harmonic Mean of 0.70360 for the test data and F1 Score of 0.69385 for the test data. For AUC of ROC, the model attained 0.75985 for the test set and for the KS Statistics for the test set, the model attained a value of 0.41227.
+
+## Random Forest Model
+Similar to the other models, our team has decided to run randomForest on the two different sets of features. 
+RandomForest uses multiple decision trees (uncorrelated) that when merged, results in a more accurate prediction.
+
+```{r Evaluation Function, echo = F}
+Evalutation <- function(prediction, data, optimum.cut, name, model) {
+  # Misclassification rates
+  target.values <- data$Class
+  n = length(target.values)
+  i <- 1
+  tn <- 0 
+  fn <- 0 
+  tp <- 0 
+  fp <- 0
+  while (i <= n) {
+    if((prediction[i] < optimum.cut) && (target.values[i] == 0)) {tn<-tn+1} 
+    else if((prediction[i] < optimum.cut) && (target.values[i]== 1)) {fn<-fn+1} 
+    else if ((prediction[i] >= optimum.cut) && (target.values[i] == 1)) { tp <- tp +1} 
+    else {fp <- fp + 1}
+    i <- i + 1
+  }
+  precision =(tp)/(tp+fp)
+  recall_score =(tp)/(tp+fn)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  tpr <- tp/(tp + fn)
+  fpr <- fp/(tn + fp)
+  tnr <- tn/(tn+fp)
+  Ave.class.acc <- (tpr+tnr)/2
+  Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+  
+  #par(mfcol = c(2,2))
+  
+  # ROC Curve and AUC
+  vec_pred <- as.vector(prediction)
+  train.ROC <- rocit(score = vec_pred, class = target.values) 
+  
+  plot(train.ROC)
+  title(paste(name, " ROC Plot"))
+  
+  # Kolmogorov-Smirnov Statistic
+  rf_half_ksplot <- ksplot(train.ROC)
+  
+  if (name == "Train") {
+    #print(paste("Train Average Class Accuracy: ",round(Ave.class.acc,5)))
+    return (round(Ave.class.acc,5))
+  } else {
+    #print(paste("Test F1 score: ",round(f1_score,5)))
+    #print(paste("Test Average Class Accuracy: ",round(Ave.class.acc,5)))
+    #print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+    #print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+    #print(paste("Test KS stat: ",round(rf_half_ksplot$`KS stat`,5)))
+    return(c(round(Ave.class.acc,5), round(rf_half_ksplot$`KS stat`,5), round(train.ROC$AUC,5)))
+  }
+  
+}
+```
+
+### Random Forest Full Model
+```{r Randomforest Full Model, echo = F, warning = F, out.width="50%"}
+full_features <- c("LIMIT_BAL", "SEX", "MARRIAGE", "BILL_AMT_MEAN", "PAY_AMT_MEAN",  "PAY_DELAY_TOTAL")
+library(ROSE)
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_full_cardDf_filtered = cardDf1[full_features]
+nn_full_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_full_balancing <- as.formula(paste("Class~", paste(full_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_full_result = ovun.sample(fmla_nn_full_balancing,
+                              data = nn_full_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_full_data = sampling_nn_full_result$data
+
+test_balance_data1 <- sampled_nn_full_data[testindex,]
+train_balance_data1 <- sampled_nn_full_data[-testindex,]
+
+target = train_balance_data1$Class
+
+features <- full_features
+fmla <- as.formula(paste("target~", paste(features, collapse = "+")))
+tk <- train_balance_data1[features]
+
+# 6 features
+start.time <- Sys.time()
+set.seed(1234)
+rf_full <- randomForest(fmla, data = tk)
+rf_full_predict <- predict(rf_full,data=tk, type = "response")
+end.time <- Sys.time()
+t <- end.time - start.time
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, rf_full_predict, optimiseFor="misclasserror")
+  
+
+train.acc <- Evalutation(rf_full_predict, train_balance_data1, optcut, "Train", "Random Forest Full Model")
+output.mat[9, 1] = "Random Forest Full Model"
+output.mat[9,2] = train.acc
+
+#target <- test_balance_data1$Class
+tk2 <- test_balance_data1[features]
+rf_full_test_predict <- predict(rf_full, newdata=tk2, type = "response")
+
+test.vec <- Evalutation(rf_full_test_predict, test_balance_data1, optcut, "Test", "Random Forest Full Model")
+output.mat[9, 3] = test.vec[1]
+output.mat[9, 4] = test.vec[2]
+output.mat[9, 5] = test.vec[3]
+
+# print(paste("Train Average Class Accuracy: ",round(train.acc,5)))
+# print(paste("Test Average Class Accuracy: ",round(test.vec[1],5)))
+# print(paste("Test AUC for model: ",round(test.vec[3],5)))
+# print(paste("Test KS stat: ",round(test.vec[2],5)))
+```
+Using the optimal threshold of 0.42682, for the training set, the full model results in a Average Class
+Accuracy of 0.83194 while for the test set, the full model results in a F1 score of 0.83499, Average Class
+Accuracy of 0.8272, Harmonic Mean of 0.82451, AUC of 0.90648 and KS statistic of 0.66053.
+
+### Random Forest Half Model
+```{r Randomforest Half Model, echo = F, warning = F, out.width="50%"}
+# Stating the features required
+half_features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_half_cardDf_filtered = cardDf1[half_features]
+nn_half_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_half_balancing <- as.formula(paste("Class~", paste(half_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_half_result = ovun.sample(fmla_nn_half_balancing,
+                              data = nn_half_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_half_data = sampling_nn_half_result$data
+
+test_balance_data1 <- sampled_nn_half_data[testindex,]
+train_balance_data1 <- sampled_nn_half_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+fmla <- as.formula(paste("target~", paste(features, collapse = "+")))
+tk <- train_balance_data1[features]
+
+
+# 3 features
+start.time <- Sys.time()
+set.seed(1234)
+rf_half <- randomForest(fmla, data = tk)
+rf_half_predict <- predict(rf_half,data=tk, type = "response")
+end.time <- Sys.time()
+t <- end.time - start.time
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, rf_half_predict, optimiseFor="misclasserror")
+  
+train.acc <- Evalutation(rf_half_predict, train_balance_data1, optcut, "Train", "Random Forest Half Model")
+output.mat[10, 1] = "Random Forest Half Model"
+output.mat[10,2] = train.acc
+
+tk2 <- test_balance_data1[features]
+rf_half_test_predict <- predict(rf_half, newdata=tk2, type = "response")
+
+test.vec <- Evalutation(rf_half_test_predict, test_balance_data1, optcut, "Test", "Random Forest Half Model")
+output.mat[10, 3] = test.vec[1]
+output.mat[10, 4] = test.vec[2]
+output.mat[10, 5] = test.vec[3]
+
+# print(paste("Train Average Class Accuracy: ",round(train.acc,5)))
+# print(paste("Test Average Class Accuracy: ",round(test.vec[1],5)))
+# print(paste("Test AUC for model: ",round(test.vec[3],5)))
+# print(paste("Test KS stat: ",round(test.vec[2],5)))
+```
+Using the optimal threshold of 0.57314, for the training set, the half model for Random Forest results in an
+Average Class Accuracy of 0.73815 while for the test set, the half model for Random Forest results in an F1
+score of 0.69261, Average Class Accuracy of 0.72827, Harmonic Mean of 0.70979, AUC for model of 0.80913,
+KS statistic of 0.46667.
+
+# Conclusion
+```{r conclusion, echo = F}
+kable(output.mat)
+```
+As the data set provided is imbalanced, using Average Class Accuracy is a better way to determine the performance of models as compared to Classification Accuracy. We have also included KS-Statistics and AUC performance of the model on the test data to help us determine which model is better.
+
+From the table above, we can see that in general all the models performed better than the baseline predictions. All of them have an average class classification of greater than 0.60 for both train and test data sets and an AUC on the test set of greater than 0.7 (Except SVM Models). 
+
+Out of all the models, the Random Forest Full Model has the highest average class accuracy for both train and test data sets. Furthermore, the KS-Statistics and AUC of this model is the highest amongst all the other models tested. Therefore, our team has come to an agreement that we should use Random Forest Full Model to solve the classification problem of whether a person defaults or not in the next month. 
+
+That said, this model comes with its own flaws. The Random Forest Full Model takes the longest to load out of all the other models. Hence, if we would like to save time, we should use the Random Forest Half Model in order to decrease the run time to attain a result that is still satistfactory.
+
+Perhaps to further improve our ability to classify the data and to reduce time, we could make use of Principle Component Analysis to reduce the number of dimensions being passed into the model. This would decrease the load time and at the same time return a satisfactory result.
+
+\newpage
+# Annex
+```{r annex_libraries, echo = TRUE, include = FALSE}
+library("tidyverse")
+library("leaps")
+library("ggplot2")
+library("nnet")
+library("RColorBrewer")
+library("corrplot")
+library("psych")
+library("ROCit")
+library("InformationValue")
+library("knitr")
+library("gridExtra")
+library("randomForest")
+library("ROCR")
+library("caret")
+library("ROSE")
+```
+
+```{r annex_introduction, echo = TRUE}
+# Load data set
+cardDf = read.csv(file = "card.csv")
+
+# Renaming the headers
+names(cardDf) <- cardDf[1,]
+cardDf <- cardDf[-1,]
+
+head(cardDf)
+```
+
+```{r annex_check_for_anomalies_NA, echo = TRUE, results='hide'}
+# Check for NA
+sum(!complete.cases(cardDf))
+
+# For SEX
+unique(cardDf$SEX)
+
+# For EDUCATION
+unique(cardDf$EDUCATION)
+
+# For MARRIAGE
+unique(cardDf$MARRIAGE)
+```
+
+
+```{r annex_gender_trends, echo = TRUE}
+cardDf$LIMIT_BAL = as.numeric(cardDf$LIMIT_BAL)
+cardDf$AGE = as.numeric(cardDf$AGE)
+
+cardDf$MARRIAGE = ifelse(cardDf$MARRIAGE == 0, 3, cardDf$MARRIAGE)
+cardDf$MARRIAGE = ifelse(cardDf$MARRIAGE == 3, 2, cardDf$MARRIAGE)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 0, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 5, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 6, 4, cardDf$EDUCATION)
+cardDf$EDUCATION = ifelse(cardDf$EDUCATION == 4, 3, cardDf$EDUCATION)
+```
+
+
+```{r annex_clean_pay_bill, echo = TRUE}
+cardDf$BILL_AMT_MEAN = as.numeric(cardDf$BILL_AMT1) + as.numeric(cardDf$BILL_AMT2) + as.numeric(cardDf$BILL_AMT3) + as.numeric(cardDf$BILL_AMT4) + as.numeric(cardDf$BILL_AMT5) + as.numeric(cardDf$BILL_AMT6) / 6
+
+cardDf$PAY_AMT_MEAN = as.numeric(cardDf$PAY_AMT1) + as.numeric(cardDf$PAY_AMT2) + as.numeric(cardDf$PAY_AMT3) + as.numeric(cardDf$PAY_AMT4) + as.numeric(cardDf$PAY_AMT5) + as.numeric(cardDf$PAY_AMT6) / 6
+
+cardDf$`default payment next month` <- as.numeric(cardDf$`default payment next month`)
+
+for (i in colnames(cardDf)) {
+  if (i == "PAY_0" | i == "PAY_2" | i == "PAY_3" | i == "PAY_4" | i == "PAY_5" | i == "PAY_6") {
+    cardDf[[i]] = ifelse(cardDf[[i]] == -2, 0, 
+                      ifelse(cardDf[[i]] == -1, 0, cardDf[[i]]))
+    
+  }
+}
+cardDf$PAY_DELAY_TOTAL = as.numeric(cardDf$PAY_0) + as.numeric(cardDf$PAY_2) + as.numeric(cardDf$PAY_3) + as.numeric(cardDf$PAY_4) + as.numeric(cardDf$PAY_5) + as.numeric(cardDf$PAY_6)
+
+cardDf$SEX = as.numeric(cardDf$SEX)
+cardDf$EDUCATION = as.numeric(cardDf$EDUCATION)
+cardDf$MARRIAGE = as.numeric(cardDf$MARRIAGE)
+
+cardDf11 <- cardDf
+cardDf1 <- cardDf11
+
+cardDf1_subset = cardDf1[c("LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE","PAY_AMT_MEAN", "BILL_AMT_MEAN",  "PAY_DELAY_TOTAL", "default payment next month")]
+str(cardDf1_subset)
+```
+
+```{r annex_data_splitting, echo = T}
+data <- read.table("card.csv",sep=",",skip=2,header=FALSE)
+header <- scan("card.csv",sep=",",nlines=2,what=character())
+set.seed(1234)
+n = length(data$V1)
+index <- 1:nrow(data)
+testindex <- sample(index, trunc(n)/4)
+
+test.data <- cardDf[testindex,]
+train.data <- cardDf[-testindex,]
+
+test.data1 <- cardDf1[testindex,]
+train.data1 <- cardDf1[-testindex,]
+```
+
+```{r annex_data_exploration_train, echo = T}
+train_explore = cardDf1_subset[-testindex,]
+summary(train_explore)
+```
+
+```{r annex_default_or_not_chart, echo = T, out.width="50%"}
+explore_target = as.factor(train_explore$`default payment next month`)
+levels(explore_target) = c("Non-default", "Default")
+
+table_DEFAULT = table(ifelse(train_explore$`default payment next month` == "1", "Default", "Non-default"))
+barplot(table_DEFAULT,
+        main = "Card Default Statistic",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        beside = TRUE,
+        ylim = c(0, 20000),
+        col = c("Lightblue", "dodgerblue"))
+```
+
+```{r annex_LIMIT_BAL_chart, echo = T, out.width="50%"}
+# hist_LIMIT_BAL = hist(train_explore$LIMIT_BAL,
+#                       main = "Frequency of Limit Balance",
+#                       xlab = "Limit Balance")
+
+LIMIT_BAL_box = boxplot(train_explore$LIMIT_BAL,
+        range = 1.5,
+        horizontal = T)
+smallest_outlier = min(LIMIT_BAL_box$out)
+train_explore_LIMIT_BAL <- train_explore
+
+LIMIT_BAL_subset = train_explore_LIMIT_BAL %>%
+       filter(train_explore_LIMIT_BAL$LIMIT_BAL < 530000)
+hist(LIMIT_BAL_subset$LIMIT_BAL,
+     main = "Frequency of Limit Balance",
+                      xlab = "Limit Balance")
+```
+
+```{r annex_trends_chart, echo = T, out.width="50%"}
+table_SEX = table(train_explore$SEX, explore_target)
+barplot(table_SEX,
+        main = "Card Default Statistic with 'SEX' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Male", "Female"),
+        beside = TRUE,
+        ylim = c(0, 12000),
+        col = c("Lightblue", "dodgerblue"))
+
+table_EDUCATION = table(train_explore$EDUCATION, explore_target)
+barplot(table_EDUCATION,
+        main = "Card Default Statistic with 'EDUCATION' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Graduate School", "University", "High School and Below"),
+        beside = TRUE,
+        ylim = c(0, 10000),
+        col = brewer.pal(n = 3, "Blues"))
+
+table_MARRIAGE = table(train_explore$MARRIAGE, explore_target)
+barplot(table_MARRIAGE,
+        main = "Card Default Statistic with 'MARRIAGE' Feature",
+        xlab = "Card Default Status",
+        ylab = "Frequency",
+        legend.text = c("Married", "Single"),
+        beside = TRUE,
+        ylim = c(0, 12000),
+        col = c("Lightblue", "dodgerblue"))
+```
+
+```{r annex_age_histogram, echo =T,out.width = "50%"}
+# hist(train_explore$AGE,
+#      main = "Frequency of Age",
+#      xlab = "Age")
+AGE_box = boxplot(train_explore$AGE,
+        range = 1.5,
+        horizontal = T)
+train_explore_AGE <- train_explore
+smallest_outlier_AGE = min(AGE_box$out)
+
+AGE_subset = train_explore_AGE %>%
+       filter(train_explore_AGE$AGE < 60)
+hist(AGE_subset$AGE,
+     main = "Frequency of Age",
+                      xlab = "Age")
+
+```
+
+```{r annex_PAY_AMT_MEAN Histogram, echo = T,out.width = "50%"}
+hist(train_explore$PAY_AMT_MEAN,
+     main = "Frequency of PAY_AMT_MEAN",
+     xlab = "PAY_AMT_MEAN")
+# PAY_AMT_MEAN_box = boxplot(train_explore$PAY_AMT_MEAN,
+#         range = 2.5,
+#         horizontal = T)
+train_explore_PAY_AMT_MEAN <- train_explore
+# smallest_outlier_PAY_AMT_MEAN = min(PAY_AMT_MEAN_box$out)
+
+PAY_AMT_MEAN_subset = train_explore_PAY_AMT_MEAN %>%
+       filter(train_explore_PAY_AMT_MEAN$PAY_AMT_MEAN < 100000)
+hist(PAY_AMT_MEAN_subset$PAY_AMT_MEAN,
+     main = "Frequency of PAY_AMT_MEAN",
+                      xlab = "PAY_AMT_MEAN")
+
+```
+
+```{r annex_BILL_AMT_MEAN histogram, echo = T, out.width="50%"}
+hist(train_explore$BILL_AMT_MEAN,
+     main = "Frequency of BILL_AMT_MEAN",
+     xlab = "BILL_AMT_MEAN")
+# BILL_AMT_MEAN_box = boxplot(train_explore$BILL_AMT_MEAN,
+#         range = 1.5,
+#         horizontal = T)
+train_explore_BILL_AMT_MEAN <- train_explore
+# smallest_outlier_BILL_AMT_MEAN = min(BILL_AMT_MEAN_box$out)
+
+BILL_AMT_MEAN_subset = train_explore_BILL_AMT_MEAN %>%
+       filter(train_explore_BILL_AMT_MEAN$BILL_AMT_MEAN < 2000000)
+hist(BILL_AMT_MEAN_subset$BILL_AMT_MEAN,
+     main = "Frequency of BILL_AMT_MEAN",
+                      xlab = "BILL_AMT_MEAN")
+```
+
+```{r annex_PAY_DELAY_TOTAL, echo = T,out.width = "50%"}
+hist(train_explore$PAY_DELAY_TOTAL,
+     main = "Frequency of PAY_DELAY_TOTAL",
+     xlab = "PAY_DELAY_TOTAL")
+# PAY_DELAY_TOTAL_box = boxplot(train_explore$PAY_DELAY_TOTAL,
+#         range = 1.5,
+#         horizontal = T)
+train_explore_PAY_DELAY_TOTAL <- train_explore
+# smallest_outlier_PAY_DELAY_TOTAL = min(PAY_DELAY_TOTAL_box$out)
+
+PAY_DELAY_TOTAL_subset = train_explore_PAY_DELAY_TOTAL %>%
+       filter(train_explore_PAY_DELAY_TOTAL$PAY_DELAY_TOTAL <= 20)
+hist(PAY_DELAY_TOTAL_subset$PAY_DELAY_TOTAL,
+     main = "Frequency of PAY_DELAY_TOTAL",
+                      xlab = "PAY_DELAY_TOTAL")
+```
+
+# Feature Selection
+## Correlation Plot
+``` {r annex_corrplot, echo = T, out.width="50%"}
+train.data1_numeric <- lapply(train.data1,as.numeric)
+
+a<-cbind(train.data1_numeric$"default payment next month", train.data1_numeric$LIMIT_BAL, train.data1_numeric$SEX, train.data1_numeric$EDUCATION, train.data1_numeric$MARRIAGE, train.data1_numeric$AGE, train.data1_numeric$PAY_AMT_MEAN, train.data1_numeric$BILL_AMT_MEAN, train.data1_numeric$PAY_DELAY_TOTAL)
+
+colnames(a) <- c("default payment next month", "LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE","PAY_AMT_MEAN", "BILL_AMT_MEAN",  "PAY_DELAY_TOTAL")
+res <- cor(a)
+
+corrplot(res,method = "number", mar=c(0.002,0.002,0.002,0.002), number.cex = 0.5, tl.cex = 0.5)
+```
+
+## Logistic Regression for Feature Selection
+
+```{r annex_feature_selection_glm, echo = T}
+summary(glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(EDUCATION) + as.numeric(AGE) + as.factor(MARRIAGE) + BILL_AMT_MEAN+ PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data, family = "binomial"))
+```
+
+## Backward Feature Selection
+
+```{r annex_feature_selection_backward, echo = T}
+outbackward <- regsubsets(train.data$`default payment next month` ~ as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + as.factor(EDUCATION) + AGE + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, 
+                          data = train.data, 
+                          method = "backward")
+summary(outbackward)
+```
+
+# Prediction Models
+
+## Baseline Predictions
+
+```{r annex_baseline_predictions, echo = T}
+# For train data
+train_predict_0 = train.data %>% mutate(predict_0 = 0)
+train_accuracy = (nrow(train_predict_0) - sum(train_predict_0$`default payment next month`)) / nrow(train_predict_0)
+
+# For test data
+test_predict_0 = test.data %>% mutate(predict_0 = 0)
+test_accuracy = (nrow(test_predict_0) - sum(test_predict_0$`default payment next month`)) / nrow(test_predict_0)
+```
+
+```{r annex_initialise_table, echo = T}
+output.mat = matrix(nrow = 10, ncol = 5)
+colnames(output.mat) = c("Model", "Train Average Class Accuracy", "Test Average Class Accuracy", "Test KS-Statistics", "Test AUC")
+```
+
+## Logistic Regression
+```{r annex_glm, echo = T}
+# Logistic Regression Full Model
+modelfull <- glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, data = train.data, family = "binomial")
+fittedfull <- predict(modelfull, data = train.data, type="response")
+
+# Logistical Regression Half Model
+modelhalf <- glm(as.factor(`default payment next month`)~as.numeric(LIMIT_BAL) + PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data, family = "binomial")
+fittedhalf <- predict(modelhalf, data = train.data, type="response")
+```
+
+### Threshold 
+```{r annex_threshold, echo = T, out.width="50%"}
+predictionsfull <- prediction(fittedfull,train.data$`default payment next month`)
+sens <- data.frame(x=unlist(performance(predictionsfull, "sens")@x.values), 
+                   y=unlist(performance(predictionsfull, "sens")@y.values))
+spec <- data.frame(x=unlist(performance(predictionsfull, "spec")@x.values), 
+                   y=unlist(performance(predictionsfull, "spec")@y.values))
+
+first = sens %>% ggplot(aes(x,y)) + 
+  geom_line() + 
+  ggtitle("Full Model") +
+  geom_line(data=spec, aes(x,y,col="red")) +
+  scale_y_continuous(sec.axis = sec_axis(~., name = "Specificity")) +
+  labs(x='Cutoff', y="Sensitivity") +
+  theme(axis.title.y.right = element_text(colour = "red"), legend.position="none")
+
+sens = cbind(unlist(performance(predictionsfull, "sens")@x.values), unlist(performance(predictionsfull, "sens")@y.values))
+spec = cbind(unlist(performance(predictionsfull, "spec")@x.values), unlist(performance(predictionsfull, "spec")@y.values))
+
+
+predictionshalf <- prediction(fittedhalf,train.data$`default payment next month`)
+sens <- data.frame(x=unlist(performance(predictionshalf, "sens")@x.values), 
+                   y=unlist(performance(predictionshalf, "sens")@y.values))
+spec <- data.frame(x=unlist(performance(predictionshalf, "spec")@x.values), 
+                   y=unlist(performance(predictionshalf, "spec")@y.values))
+
+second = sens %>% ggplot(aes(x,y)) + 
+  geom_line() +
+  ggtitle("Half Model") +
+  geom_line(data=spec, aes(x,y,col="red")) +
+  scale_y_continuous(sec.axis = sec_axis(~., name = "Specificity")) +
+  labs(x='Cutoff', y="Sensitivity") +
+  theme(axis.title.y.right = element_text(colour = "red"), legend.position="none")
+
+sens = cbind(unlist(performance(predictionshalf, "sens")@x.values), unlist(performance(predictionshalf, "sens")@y.values))
+spec = cbind(unlist(performance(predictionshalf, "spec")@x.values), unlist(performance(predictionshalf, "spec")@y.values))
+grid.arrange(first, second, ncol = 2)
+```
+
+### Logistic Regression Full Model (Threshold = 0.5)
+```{r annex_evalglm0.5, echo=T, out.width="50%"}
+err_metric=function(CM, data_type)
+{
+  TN =CM[1,1]
+  TP =CM[2,2]
+  FP =CM[1,2]
+  FN =CM[2,1]
+  precision =(TP)/(TP+FP)
+  recall_score =(TP)/(TP+FN)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  accuracy_model  =(TP+TN)/(TP+TN+FP+FN)
+  True_positive_rate = (TP)/(TP+FN)
+  True_negative_rate =(TN)/(TN+FP)
+  Avg_class_accuracy =(True_positive_rate + True_negative_rate)/2
+  
+  if (data_type == "Train") {
+    #print("Positive = default, Negative = non default")
+    # print(paste("Train Average class accuracy: ", round(Avg_class_accuracy, 5)))
+  } else {
+    #print(paste("Test Average class accuracy: ", round(Avg_class_accuracy, 5)))
+    #print(paste("Test F1 score of the model: ",round(f1_score,5)))
+  }
+  return(round(Avg_class_accuracy, 5))
+}
+
+logit_P = predict(modelfull, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.5  ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_full_train_low = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted11 <- predict(modelfull, test.data, type="response")
+a <- ifelse(fitted11 <= 0.5, 0, 1)
+test <- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+#print(paste("Train Average class accuracy: ", round(glm_full_train_low, 5)))
+glm_full_test_low = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+output.mat[1,] = c("Logistic Regression Full Model (Threshold = 0.5)", glm_full_train_low, glm_full_test_low, KS_stat_test, AUC_test)
+```
+
+### Logistic Regression Half Model (Threshold = 0.5)
+```{r annex_glm_half_0.5_eval, echo = T, results='hide', out.width="50%"}
+logit_P = predict(modelhalf, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.5  ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_half_train_low = err_metric(CM, "Train")
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted22 <- predict(modelhalf, test.data, type="response")
+a <- ifelse(fitted22 <= 0.5, 0, 1)
+test<- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+print(paste("Train Average class accuracy: ", round(glm_half_train_low, 5)))
+glm_half_test_low = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+plot(test.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[2,] = c("Logistic Regression Half Model (Threshold = 0.5)", glm_half_train_low, glm_half_test_low, KS_stat_test, AUC_test)
+```
+
+### Logistic Regression Full Model (Optimized)
+```{r annex_evalglm_full, echo = T, results='hide', out.width="50%"}
+logit_P = predict(modelfull, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.181004,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_full_opt_train = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+
+plot(train.ROC)
+title("ROC Train Plot")
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+
+# Test Data Evaluation
+fitted11 <- predict(modelfull, test.data, type="response")
+a <- ifelse(fitted11 > 0.1770384 , 1, 0)
+test <- cbind(test.data, a)
+print(paste("Train Average class accuracy: ", round(glm_full_opt_train, 5)))
+CM = table(test$`default payment next month`, test$a)
+glm_full_opt_test = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelfull, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Test Plot")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[3,] = c("Logistic Regression Full Model (Optimized)", glm_full_opt_train, glm_full_opt_test, KS_stat_test, AUC_test)
+```
+
+
+### Logistic Regression Half Model (Optimized)
+```{r annex_evalglm_half, echo = T, results='hide', out.width="50%"}
+logit_P = predict(modelhalf, data = train.data, type="response")
+logit_P <- ifelse(logit_P > 0.1676483 ,1,0) # Probability check
+CM= table(train.data$`default payment next month` , logit_P)
+glm_half_opt_train = err_metric(CM, "Train")
+
+#ROC-curve 
+vec_pred <- as.vector(predict(modelhalf, data = train.data, type="response"))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+
+plot(train.ROC)
+title("ROC Train Plot")
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+
+# Test Data Evaluation
+fitted22 <- predict(modelhalf, test.data, type="response")
+a <- ifelse(fitted22 > 0.1676483 ,1,0)
+test<- cbind(test.data, a)
+print(paste("Train Average class accuracy: ", round(glm_half_opt_train, 5)))
+CM = table(test$`default payment next month`, test$a)
+glm_half_opt_test = err_metric(CM, "Test")
+
+#ROC-curve
+vec_pred <- as.vector(predict(modelhalf, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+
+plot(test.ROC)
+title("ROC Plot")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[4,] = c("Logistic Regression Half Model (Optimized)", glm_half_opt_train, glm_half_opt_test, KS_stat_test, AUC_test)
+```
+
+## SVM
+```{r annex_svm, echo = T, warning =F}
+library(e1071)
+# SVM Full Model
+svmfull.model <- svm(`default payment next month` ~ as.numeric(LIMIT_BAL) + as.factor(SEX) + as.factor(MARRIAGE) + PAY_AMT_MEAN + PAY_DELAY_TOTAL + BILL_AMT_MEAN, data = train.data,type="C-classification",
+           kernel="radial")
+
+# SVM Half Model
+svmhalf.model <- svm(`default payment next month`~as.numeric(LIMIT_BAL) + PAY_AMT_MEAN + PAY_DELAY_TOTAL, data = train.data,type="C-classification",
+           kernel="radial")
+```
+
+### SVM Full Model
+```{r annex_evalsvmtrain, echo = T, fig.show='hide', results='hide'}
+err_metric=function(CM, data_type)
+{
+  TN =CM[1,1]
+  TP =CM[2,2]
+  FP =CM[1,2]
+  FN =CM[2,1]
+  precision =(TP)/(TP+FP)
+  recall_score =(TP)/(TP+FN)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  accuracy_model  =(TP+TN)/(TP+TN+FP+FN)
+  True_positive_rate = (TP)/(TP+FN)
+  True_negative_rate =(TN)/(TN+FP)
+  Avg_class_accuracy =(True_positive_rate + True_negative_rate)/2
+  
+  if (data_type == "Train") {
+    print("Positive = default, Negative = non default")
+    print(paste("Train Average class accuracy: ", round(Avg_class_accuracy, 5)))
+  } else {
+    print(paste("Test Average class accuracy: ", round(Avg_class_accuracy, 5)))
+    print(paste("Test F1 score of the model: ",round(f1_score,5)))
+  }
+  return(round(Avg_class_accuracy, 5))
+}
+svm_P = predict(svmfull.model, data = train.data)
+CM= table(train.data$`default payment next month` , svm_P)
+svm_full_train = err_metric(CM,"Train")
+
+#ROC-curve
+vec_pred <- as.vector(predict(svmfull.model, data = train.data))
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+#plot(train.ROC)
+#title("ROC for Train Data for SVM Full Model")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+#nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted11 <- predict(svmfull.model, test.data, type="response")
+a <- fitted11
+test <- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+svm_full_test = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(svmfull.model, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+#plot(test.ROC)
+#title("ROC for Test Data for SVM Full Model")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+
+output.mat[5,] = c("SVM Full Model", svm_full_train, svm_full_test, KS_stat_test, AUC_test)
+```
+
+### SVM Half model
+```{r annex_evalsvmhalftrain, echo = T, fig.show='hide', results = 'hide'}
+svm_P = predict(svmhalf.model, data = train.data)
+CM= table(train.data$`default payment next month` , svm_P)
+svm_half_train = err_metric(CM, "Train")
+
+#ROC-curve
+vec_pred <- as.vector(svm_P)
+train.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(train.data1$`default payment next month`))
+#plot(train.ROC)
+#title("ROC for Train Data for SVM Half Model")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+#nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+fitted22 <- predict(svmhalf.model, test.data, type="response")
+a <- fitted22
+test<- cbind(test.data, a)
+CM = table(test$`default payment next month`, test$a)
+svm_half_test = err_metric(CM, "Test")
+#ROC-curve
+vec_pred <- as.vector(predict(svmhalf.model, test.data, type="response"))
+test.ROC <- rocit(score = as.numeric(vec_pred), class = as.numeric(test$`default payment next month`))
+#plot(test.ROC)
+#title("ROC for Test Data for SVM Half Model")
+print(paste("Test AUC for model: ",round(test.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(test.ROC)
+print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(test.ROC$AUC,5)
+output.mat[6,] = c("SVM Half Model", svm_half_train, svm_half_test, KS_stat_test, AUC_test)
+```
+
+## Neural Network
+
+### Neural Network Full Model
+```{r annex_neural_network, echo = T, out.width="50%"}
+# Stating the features required
+full_features <- c("LIMIT_BAL", "SEX", "MARRIAGE", "BILL_AMT_MEAN", "PAY_AMT_MEAN",  "PAY_DELAY_TOTAL")
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_full_cardDf_filtered = cardDf1[full_features]
+nn_full_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_full_balancing <- as.formula(paste("Class~", paste(full_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_full_result = ovun.sample(fmla_nn_full_balancing,
+                              data = nn_full_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_full_data = sampling_nn_full_result$data
+
+test_balance_data1 <- sampled_nn_full_data[testindex,]
+train_balance_data1 <- sampled_nn_full_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+fmla <- as.formula(paste("target~", paste(full_features, collapse = "+")))
+tk <- train_balance_data1[full_features]
+
+hidden.size = round((2/3) * ncol(tk) + 1)
+set.seed(1234)
+
+nn_full <- nnet(fmla, 
+           data = tk, 
+           maxit= 1000, 
+           size = hidden.size, 
+           entropy = T, 
+           decay = 0.8,
+           trace = F)
+
+# Outputs the predicted value for `default` between 0 and 1, for each observation
+nn_full_predict <- predict(nn_full, tk, type="raw")
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, nn_full_predict, optimiseFor="misclasserror")
+#print(paste("Optimal Cutoff: ",round(optcut,5)))
+
+# Confusion Matrix
+library(caret)
+target.values <- train_balance_data1$Class
+predicted.values <- ifelse(nn_full_predict < optcut, 0, 1)
+#table(as.factor(target.values), as.factor(predicted.values))
+
+# Prediction Accuracy
+nn_accuracy <- mean(target.values == predicted.values)
+#print(paste("Neural Network prediction accuracy: ",round(nn_accuracy,5)))
+
+# Misclassification rates
+target.values <- train_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_full_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_full_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_full_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+  
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_train <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("F1 Score: ", round(f1_score, 5)))
+#print(paste("Harmonic Mean: ",round(Harmonic.mean,5)))
+
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_full_predict)
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+# Misclassification rates for test
+# Generate for test balanced data set
+nn_full_test_predict <- predict(nn_full, test_balance_data1[full_features], type = "raw")
+target_test_values = test_balance_data1$Class
+predicted_test_values = ifelse(nn_full_test_predict < optcut, 0, 1)
+nn_test_accuracy <- mean(target_test_values == predicted_test_values)
+#print(paste("Neural Network Prediction Test Accuracy: ", round(nn_test_accuracy, 5)))
+
+target.values <- test_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_full_test_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_full_test_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_full_test_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_test <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+
+#print(paste("Train Average Class Accuracy: ",round(Ave.class.acc_train,5)))
+#print(paste("Test F1 Score: ", round(f1_score, 5)))
+#print(paste("Test Average Class Accuracy: ",round(Ave.class.acc_test,5)))
+#print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_full_test_predict)
+target = test_balance_data1$Class
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Test Plot")
+#print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("Test KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(train.ROC$AUC,5)
+
+output.mat[7,] = c("Neural Network Full Model", round(Ave.class.acc_train, 5), round(Ave.class.acc_test, 5), KS_stat_test, AUC_test)
+```
+
+### Neural Network Half Model
+```{r annex_nn_half, echo = T, out.width="50%"}
+# Stating the features required
+half_features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+library(ROSE)
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_half_cardDf_filtered = cardDf1[half_features]
+nn_half_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_half_balancing <- as.formula(paste("Class~", paste(half_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_half_result = ovun.sample(fmla_nn_half_balancing,
+                              data = nn_half_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_half_data = sampling_nn_half_result$data
+
+test_balance_data1 <- sampled_nn_half_data[testindex,]
+train_balance_data1 <- sampled_nn_half_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+fmla <- as.formula(paste("target~", paste(half_features, collapse = "+")))
+tk <- train_balance_data1[half_features]
+
+hidden.size = round((2/3) * ncol(tk) + 1)
+set.seed(1234)
+
+nn_half <- nnet(fmla, 
+           data = tk, 
+           maxit= 1000, 
+           size = hidden.size, 
+           entropy = T,
+           decay = 0.8,
+           trace = F)
+
+# Outputs the predicted value for `default` between 0 and 1, for each observation
+nn_half_predict <- predict(nn_half, tk, type="raw")
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, nn_half_predict, optimiseFor="misclasserror")
+#print(paste("Optimal Cutoff: ",round(optcut,5)))
+
+# Confusion Matrix
+library(caret)
+target.values <- train_balance_data1$Class
+predicted.values <- ifelse(nn_half_predict < optcut, 0, 1)
+#table(as.factor(target.values), as.factor(predicted.values))
+
+# Prediction Accuracy
+nn_accuracy <- mean(target.values == predicted.values)
+#print(paste("Neural Network prediction accuracy: ",round(nn_accuracy,5)))
+
+# Misclassification rates
+target.values <- train_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_half_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_half_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_half_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_train <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("F1 Score: ", round(f1_score, 5)))
+#print(paste("Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_half_predict)
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Train Plot")
+#print(paste("AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+# Misclassification rates for test
+# Generate for test balanced data set
+nn_half_test_predict <- predict(nn_half, test_balance_data1[half_features], type = "raw")
+target_test_values = test_balance_data1$Class
+predicted_test_values = ifelse(nn_half_test_predict < optcut, 0, 1)
+nn_test_accuracy <- mean(target_test_values == predicted_test_values)
+#print(paste("Neural Network Prediction Test Accuracy: ", round(nn_test_accuracy, 5)))
+
+target.values <- test_balance_data1$Class
+n = length(target.values)
+
+i <- 1
+tn <- 0 
+fn <- 0 
+tp <- 0 
+fp <- 0
+while (i <= n) {
+  if((nn_half_test_predict[i] < optcut) && (target.values[i] == 0)) {tn<-tn+1} 
+  else if((nn_half_test_predict[i] < optcut) && (target.values[i]== 1)) {fn<-fn+1} 
+  else if ((nn_half_test_predict[i] >= optcut) && (target.values[i] == 1)) { tp <- tp +1} 
+  else {fp <- fp + 1}
+  i <- i + 1
+}
+
+precision =(tp)/(tp+fp)
+recall_score =(tp)/(tp+fn)
+f1_score=2*((precision*recall_score)/(precision+recall_score))
+
+#cat("Threshold = " ,optcut, " TN FN TP FP ",tn,fn,tp,fp,"\n") 
+tpr <- tp/(tp + fn)
+fpr <- fp/(tn + fp)
+#cat("Threshold = " ,optcut, " TPR FPR ",tpr,fpr,"\n\n")
+tnr <- tn/(tn+fp)
+Ave.class.acc_test <- (tpr+tnr)/2
+Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+#print(paste("Train Average Class Accuracy: ",round(Ave.class.acc_train,5)))
+#print(paste("Test F1 Score: ", round(f1_score, 5)))
+#print(paste("Test Average Class Accuracy: ",round(Ave.class.acc_test,5)))
+#print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+
+library(ROCit)
+# ROC Curve and AUC
+vec_pred <- as.vector(nn_half_test_predict)
+target = test_balance_data1$Class
+train.ROC <- rocit(score = vec_pred, class = target) 
+plot(train.ROC)
+title("ROC Plot")
+#print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+
+
+# Kolmogorov-Smirnov Statistic
+nn_ksplot <- ksplot(train.ROC)
+#print(paste("Test KS stat: ",round(nn_ksplot$`KS stat`,5)))
+#print(paste("Test KS cutoff: ",round(nn_ksplot$`KS Cutoff`,5)))
+
+KS_stat_test = round(nn_ksplot$`KS stat`,5)
+AUC_test = round(train.ROC$AUC,5)
+
+output.mat[8,] = c("Neural Network Half Model", round(Ave.class.acc_train, 5), round(Ave.class.acc_test, 5), KS_stat_test, AUC_test)
+```
+
+## Random Forest Model
+```{r annex_Evaluation Function, echo = T}
+Evalutation <- function(prediction, data, optimum.cut, name, model) {
+  # Misclassification rates
+  target.values <- data$Class
+  n = length(target.values)
+  i <- 1
+  tn <- 0 
+  fn <- 0 
+  tp <- 0 
+  fp <- 0
+  while (i <= n) {
+    if((prediction[i] < optimum.cut) && (target.values[i] == 0)) {tn<-tn+1} 
+    else if((prediction[i] < optimum.cut) && (target.values[i]== 1)) {fn<-fn+1} 
+    else if ((prediction[i] >= optimum.cut) && (target.values[i] == 1)) { tp <- tp +1} 
+    else {fp <- fp + 1}
+    i <- i + 1
+  }
+  precision =(tp)/(tp+fp)
+  recall_score =(tp)/(tp+fn)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  tpr <- tp/(tp + fn)
+  fpr <- fp/(tn + fp)
+  tnr <- tn/(tn+fp)
+  Ave.class.acc <- (tpr+tnr)/2
+  Harmonic.mean <- 1/((1/2)*(1/tpr + 1/tnr))
+  
+  #par(mfcol = c(2,2))
+  
+  # ROC Curve and AUC
+  vec_pred <- as.vector(prediction)
+  train.ROC <- rocit(score = vec_pred, class = target.values) 
+  
+  plot(train.ROC)
+  title(paste(name, " ROC Plot"))
+  
+  # Kolmogorov-Smirnov Statistic
+  rf_half_ksplot <- ksplot(train.ROC)
+  
+  if (name == "Train") {
+    #print(paste("Train Average Class Accuracy: ",round(Ave.class.acc,5)))
+    return (round(Ave.class.acc,5))
+  } else {
+    #print(paste("Test F1 score: ",round(f1_score,5)))
+    #print(paste("Test Average Class Accuracy: ",round(Ave.class.acc,5)))
+    #print(paste("Test Harmonic Mean: ",round(Harmonic.mean,5)))
+    #print(paste("Test AUC for model: ",round(train.ROC$AUC,5)))
+    #print(paste("Test KS stat: ",round(rf_half_ksplot$`KS stat`,5)))
+    return(c(round(Ave.class.acc,5), round(rf_half_ksplot$`KS stat`,5), round(train.ROC$AUC,5)))
+  }
+  
+}
+```
+
+### Random Forest Full Model
+```{r annex_Randomforest Full Model, echo = T, warning = F, out.width="50%"}
+full_features <- c("LIMIT_BAL", "SEX", "MARRIAGE", "BILL_AMT_MEAN", "PAY_AMT_MEAN",  "PAY_DELAY_TOTAL")
+library(ROSE)
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_full_cardDf_filtered = cardDf1[full_features]
+nn_full_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_full_balancing <- as.formula(paste("Class~", paste(full_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_full_result = ovun.sample(fmla_nn_full_balancing,
+                              data = nn_full_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_full_data = sampling_nn_full_result$data
+
+test_balance_data1 <- sampled_nn_full_data[testindex,]
+train_balance_data1 <- sampled_nn_full_data[-testindex,]
+
+target = train_balance_data1$Class
+
+features <- full_features
+fmla <- as.formula(paste("target~", paste(features, collapse = "+")))
+tk <- train_balance_data1[features]
+
+# 6 features
+start.time <- Sys.time()
+set.seed(1234)
+rf_full <- randomForest(fmla, data = tk)
+rf_full_predict <- predict(rf_full,data=tk, type = "response")
+end.time <- Sys.time()
+t <- end.time - start.time
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, rf_full_predict, optimiseFor="misclasserror")
+  
+
+train.acc <- Evalutation(rf_full_predict, train_balance_data1, optcut, "Train", "Random Forest Full Model")
+output.mat[9, 1] = "Random Forest Full Model"
+output.mat[9,2] = train.acc
+
+#target <- test_balance_data1$Class
+tk2 <- test_balance_data1[features]
+rf_full_test_predict <- predict(rf_full, newdata=tk2, type = "response")
+
+test.vec <- Evalutation(rf_full_test_predict, test_balance_data1, optcut, "Test", "Random Forest Full Model")
+output.mat[9, 3] = test.vec[1]
+output.mat[9, 4] = test.vec[2]
+output.mat[9, 5] = test.vec[3]
+
+# print(paste("Train Average Class Accuracy: ",round(train.acc,5)))
+# print(paste("Test Average Class Accuracy: ",round(test.vec[1],5)))
+# print(paste("Test AUC for model: ",round(test.vec[3],5)))
+# print(paste("Test KS stat: ",round(test.vec[2],5)))
+```
+
+### Random Forest Half Model
+```{r annex_Randomforest Half Model, echo = T, warning = F, out.width="50%"}
+# Stating the features required
+half_features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+
+cardDf1$LIMIT_BAL = as.numeric(cardDf1$LIMIT_BAL)
+cardDf1$EDUCATION = as.numeric(cardDf1$EDUCATION)
+cardDf1$MARRIAGE = as.numeric(cardDf1$MARRIAGE)
+
+nn_half_cardDf_filtered = cardDf1[half_features]
+nn_half_cardDf_filtered$Class = cardDf1$`default payment next month`
+fmla_nn_half_balancing <- as.formula(paste("Class~", paste(half_features, collapse = "+")))
+
+# Handling imbalance data with ROSE
+new_n_total = nrow(cardDf1)
+fraction_default_new = 0.5
+sampling_nn_half_result = ovun.sample(fmla_nn_half_balancing,
+                              data = nn_half_cardDf_filtered,
+                              method = "both",
+                              N = new_n_total,
+                              p = fraction_default_new,
+                              seed = 1234)
+sampled_nn_half_data = sampling_nn_half_result$data
+
+test_balance_data1 <- sampled_nn_half_data[testindex,]
+train_balance_data1 <- sampled_nn_half_data[-testindex,]
+
+target <- train_balance_data1$Class
+
+features <- c("LIMIT_BAL","PAY_AMT_MEAN", "PAY_DELAY_TOTAL")
+fmla <- as.formula(paste("target~", paste(features, collapse = "+")))
+tk <- train_balance_data1[features]
+
+
+# 3 features
+start.time <- Sys.time()
+set.seed(1234)
+rf_half <- randomForest(fmla, data = tk)
+rf_half_predict <- predict(rf_half,data=tk, type = "response")
+end.time <- Sys.time()
+t <- end.time - start.time
+
+# Find optimal cutoff threshold to use to maximize accuracy
+optcut <- optimalCutoff(train_balance_data1$Class, rf_half_predict, optimiseFor="misclasserror")
+  
+train.acc <- Evalutation(rf_half_predict, train_balance_data1, optcut, "Train", "Random Forest Half Model")
+output.mat[10, 1] = "Random Forest Half Model"
+output.mat[10,2] = train.acc
+
+tk2 <- test_balance_data1[features]
+rf_half_test_predict <- predict(rf_half, newdata=tk2, type = "response")
+
+test.vec <- Evalutation(rf_half_test_predict, test_balance_data1, optcut, "Test", "Random Forest Half Model")
+output.mat[10, 3] = test.vec[1]
+output.mat[10, 4] = test.vec[2]
+output.mat[10, 5] = test.vec[3]
+
+# print(paste("Train Average Class Accuracy: ",round(train.acc,5)))
+# print(paste("Test Average Class Accuracy: ",round(test.vec[1],5)))
+# print(paste("Test AUC for model: ",round(test.vec[3],5)))
+# print(paste("Test KS stat: ",round(test.vec[2],5)))
+```
+
+# Conclusion
+```{r annex_conclusion, echo = T}
+kable(output.mat)
+```
+
+
